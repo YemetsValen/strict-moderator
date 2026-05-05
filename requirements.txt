@@ -1,3 +1,6 @@
 PyYAML>=6.0.2
-# Optional — only needed when config.model_type = "openai".
+# Optional — only needed when config.model_type = "openai" (also used for any
+# OpenAI-compatible API such as DeepSeek / OpenRouter via `base_url`).
 openai>=1.54.0
+# Optional — only needed when config.model_type = "anthropic".
+anthropic>=0.40.0

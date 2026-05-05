@@ -33,7 +33,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-type",
         default=None,
-        choices=["openai", "mock"],
+        choices=["openai", "anthropic", "mock"],
         help="Override config.model_type for this run only.",
     )
     parser.add_argument(
@@ -56,6 +56,7 @@ def _apply_overrides(config: Config, args: argparse.Namespace) -> Config:
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         request_timeout_seconds=config.request_timeout_seconds,
+        base_url=config.base_url,
         labels=list(config.labels),
         block_labels=list(config.block_labels),
         metrics=list(config.metrics),
