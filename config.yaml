@@ -1,0 +1,63 @@
+# Moderator evaluation config.
+#
+# Every knob the framework cares about lives here. Code reads this file and
+# never hard-codes labels, paths, or model names — that's what makes the
+# framework "pluggable".
+
+# Where to find the JSONL dataset (relative to the repo root).
+# Each line: {"text": "...", "label": "<one of `labels` below>"}
+dataset_path: data/sample_dataset.jsonl
+
+# Where to write the evaluation report (JSON).
+output_path: reports/last_run.json
+
+# Where to read the system prompt from.
+prompt_path: prompts/system_prompt.txt
+
+# --- Model ---
+# "openai" calls the OpenAI Chat Completions API (needs OPENAI_API_KEY in env).
+# "mock"   uses a deterministic rule-based classifier — useful for unit tests
+#          and CI runs where no API key is available.
+model_type: mock
+model_name: gpt-4o-mini
+temperature: 0.0
+# Hard ceiling so a buggy model can't drain your bill.
+max_tokens: 200
+# How long to wait for the model before giving up on a single example.
+request_timeout_seconds: 30
+
+# --- Labels ---
+# Every label that may appear in the dataset OR be returned by the model.
+# Adding a new category = appending to this list (no code changes needed).
+labels:
+  - ok
+  - spam
+  - gray_platform_switch
+  - hidden_aggression
+  - other
+
+# Subset of `labels` that map to verdict=BLOCK. Everything else is ALLOW.
+block_labels:
+  - spam
+  - gray_platform_switch
+  - hidden_aggression
+
+# --- Metrics ---
+# Names must match callables registered in src/metrics.py.
+# Add a new metric: register it there, list it here, done.
+metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+
+# How to aggregate per-class metrics into a single number.
+# Choose any subset of: macro, micro, weighted.
+metric_averages:
+  - macro
+  - micro
+
+# --- Logging ---
+log_level: INFO
+# If true, prints a per-example line as evaluation runs.
+verbose: true

@@ -1,0 +1,3 @@
+PyYAML>=6.0.2
+# Optional — only needed when config.model_type = "openai".
+openai>=1.54.0
