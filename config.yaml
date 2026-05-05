@@ -15,11 +15,30 @@ output_path: reports/last_run.json
 prompt_path: prompts/system_prompt.txt
 
 # --- Model ---
-# "openai" calls the OpenAI Chat Completions API (needs OPENAI_API_KEY in env).
-# "mock"   uses a deterministic rule-based classifier — useful for unit tests
-#          and CI runs where no API key is available.
+# Pick a provider:
+#   "openai"     — OpenAI Chat Completions (needs OPENAI_API_KEY).
+#                  Also drives any OpenAI-compatible API (DeepSeek,
+#                  OpenRouter, Together, local Ollama) by setting `base_url`
+#                  below.
+#   "anthropic"  — Anthropic Claude Messages API (needs ANTHROPIC_API_KEY).
+#   "mock"       — deterministic rule-based classifier; useful for unit tests
+#                  and CI runs where no API key is available.
 model_type: mock
+
+# Examples of `model_name` per provider:
+#   openai:    gpt-4o-mini, gpt-4o, gpt-4.1, o3-mini
+#   anthropic: claude-3-5-haiku-latest, claude-3-5-sonnet-latest, claude-opus-4-1
+#   deepseek:  deepseek-chat   (set base_url: https://api.deepseek.com/v1)
 model_name: gpt-4o-mini
+
+# Optional. Only used by the "openai" provider; lets you point the OpenAI
+# SDK at any OpenAI-compatible API. Leave empty for vanilla OpenAI.
+# Examples:
+#   https://api.deepseek.com/v1
+#   https://openrouter.ai/api/v1
+#   http://localhost:11434/v1     # Ollama
+base_url: ""
+
 temperature: 0.0
 # Hard ceiling so a buggy model can't drain your bill.
 max_tokens: 200

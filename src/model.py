@@ -77,7 +77,16 @@ class OpenAIProvider(ModelProvider):
                 "OPENAI_API_KEY is not set; either export the key or switch "
                 "model_type to 'mock' in config.yaml."
             )
-        self._client = OpenAI(api_key=api_key, timeout=self.config.request_timeout_seconds)
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": self.config.request_timeout_seconds,
+        }
+        # `base_url` lets DeepSeek, OpenRouter, Together, Ollama, etc. work
+        # through this provider without a new class — they all expose the
+        # OpenAI Chat Completions schema.
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        self._client = OpenAI(**kwargs)
         return self._client
 
     def call(self, system_prompt: str, text: str) -> ModelOutput:
@@ -105,6 +114,86 @@ class OpenAIProvider(ModelProvider):
             )
         raw = resp.choices[0].message.content or ""
         return _parse_or_default(raw, allowed_categories=set(self.config.labels))
+
+
+# ---------- Anthropic ----------
+class AnthropicProvider(ModelProvider):
+    """Anthropic Claude via the official ``anthropic`` SDK.
+
+    The Messages API takes ``system`` as a top-level argument (not a role),
+    and replies with a list of content blocks — we concatenate the text
+    blocks before parsing. Claude has no first-class JSON mode, so we rely
+    on the prompt to enforce the JSON schema and the same robust fallback
+    parser the OpenAI provider uses.
+
+    Requires:
+      - ``anthropic`` Python package (in requirements.txt)
+      - ``ANTHROPIC_API_KEY`` environment variable
+    """
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self._client: Any | None = None
+
+    def _ensure_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            from anthropic import Anthropic  # imported lazily; optional dependency
+        except ImportError as e:  # pragma: no cover - import guard
+            raise RuntimeError(
+                "anthropic package is not installed. Run `pip install -r requirements.txt`."
+            ) from e
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set; either export the key or switch "
+                "model_type to 'mock' / 'openai' in config.yaml."
+            )
+        self._client = Anthropic(api_key=api_key, timeout=self.config.request_timeout_seconds)
+        return self._client
+
+    def call(self, system_prompt: str, text: str) -> ModelOutput:
+        client = self._ensure_client()
+        try:
+            resp = client.messages.create(
+                model=self.config.model_name,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": text}],
+            )
+        except Exception as e:  # pragma: no cover - network errors aren't unit-testable
+            log.warning("Anthropic call failed for text=%r: %s", text[:80], e)
+            return ModelOutput(
+                verdict="BLOCK",
+                category="other",
+                confidence=0.0,
+                reason=f"anthropic error: {e}",
+                raw="",
+                parse_ok=False,
+            )
+        raw = _join_anthropic_text(resp)
+        return _parse_or_default(raw, allowed_categories=set(self.config.labels))
+
+
+def _join_anthropic_text(resp: Any) -> str:
+    """Pull every text block out of an Anthropic Messages response."""
+    blocks = getattr(resp, "content", None) or []
+    parts: list[str] = []
+    for block in blocks:
+        # SDK objects expose ``.type`` and ``.text``; we accept dict-shaped
+        # fakes in tests too so the test suite doesn't depend on the SDK.
+        block_type = getattr(block, "type", None) or (
+            block.get("type") if isinstance(block, dict) else None
+        )
+        if block_type == "text":
+            text = getattr(block, "text", None) or (
+                block.get("text") if isinstance(block, dict) else None
+            )
+            if text:
+                parts.append(str(text))
+    return "".join(parts)
 
 
 # ---------- Mock ----------
@@ -181,9 +270,11 @@ def build_provider(config: Config) -> ModelProvider:
     kind = config.model_type.strip().lower()
     if kind == "openai":
         return OpenAIProvider(config)
+    if kind == "anthropic":
+        return AnthropicProvider(config)
     if kind == "mock":
         return MockProvider(config)
-    raise ValueError(f"unknown model_type: {kind!r}; expected one of: openai, mock")
+    raise ValueError(f"unknown model_type: {kind!r}; expected one of: openai, anthropic, mock")
 
 
 # ---------- public entry point ----------

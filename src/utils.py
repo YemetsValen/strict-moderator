@@ -31,6 +31,9 @@ class Config:
     temperature: float
     max_tokens: int
     request_timeout_seconds: float
+    # Optional override for OpenAI-compatible providers (DeepSeek, OpenRouter,
+    # Together, local Ollama, …). Empty string means "use the SDK default".
+    base_url: str
 
     labels: list[str]
     block_labels: list[str]
@@ -56,6 +59,7 @@ class Config:
                 temperature=float(raw.get("temperature", 0.0)),
                 max_tokens=int(raw.get("max_tokens", 200)),
                 request_timeout_seconds=float(raw.get("request_timeout_seconds", 30)),
+                base_url=str(raw.get("base_url", "") or ""),
                 labels=list(raw["labels"]),
                 block_labels=list(raw["block_labels"]),
                 metrics=list(raw.get("metrics", ["accuracy"])),

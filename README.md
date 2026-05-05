@@ -43,12 +43,39 @@ By default `config.yaml` uses the **mock provider** — a deterministic
 rule-based classifier that needs no API key. Output is written to
 `reports/last_run.json` and a summary is printed to stdout.
 
-To use OpenAI:
+### Picking a provider
 
+Switch providers entirely from `config.yaml` — no code changes:
+
+**OpenAI**
+```yaml
+model_type: openai
+model_name: gpt-4o-mini
+```
 ```bash
 export OPENAI_API_KEY=sk-...
-# in config.yaml: model_type: openai
-python -m src.main --config config.yaml
+python -m src.main
+```
+
+**Anthropic Claude**
+```yaml
+model_type: anthropic
+model_name: claude-3-5-haiku-latest    # or claude-3-5-sonnet-latest, etc.
+```
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+python -m src.main
+```
+
+**DeepSeek / OpenRouter / Together / Ollama** (any OpenAI-compatible API)
+```yaml
+model_type: openai
+model_name: deepseek-chat
+base_url: https://api.deepseek.com/v1
+```
+```bash
+export OPENAI_API_KEY=<deepseek-key>
+python -m src.main
 ```
 
 You can also override any of `dataset_path`, `model_type`, or `output_path`
@@ -138,15 +165,15 @@ To add a new metric:
 
 ### Model provider
 
-`src/model.py` defines a `ModelProvider` abstract base. Two
+`src/model.py` defines a `ModelProvider` abstract base. Three
 implementations ship:
 
-- `OpenAIProvider` — uses Chat Completions with `response_format={"type": "json_object"}`
-- `MockProvider` — deterministic regex rules; useful for CI
+- `OpenAIProvider` — Chat Completions with `response_format={"type": "json_object"}`. Honours `base_url` so the same class drives DeepSeek, OpenRouter, Together, Ollama, etc.
+- `AnthropicProvider` — Claude Messages API. The system prompt is passed at the top level (per Anthropic's API) and text-blocks of the response are concatenated before parsing.
+- `MockProvider` — deterministic regex rules; useful for CI and as a baseline.
 
-To add Anthropic / DeepSeek / Ollama: subclass `ModelProvider`,
-implement `call(system_prompt, text) -> ModelOutput`, then extend
-`build_provider()` with the new key.
+To add a brand-new provider (Cohere, Mistral, Google Gemini, …):
+subclass `ModelProvider`, implement `call(system_prompt, text) -> ModelOutput`, then extend `build_provider()` with the new key.
 
 ## Jailbreak resistance
 
