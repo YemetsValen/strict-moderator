@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, "cacao/**"]
   pull_request:
 
 jobs:
