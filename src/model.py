@@ -161,9 +161,7 @@ class MockProvider(ModelProvider):
         # crypto pitch is spam, not a platform switch.
         spam_hit = bool(self._SPAM.search(text) or self._MONEY.search(text))
         platform_hit = bool(
-            self._PLATFORMS.search(text)
-            or self._URL_RE.search(text)
-            or self._PHONE_RE.search(text)
+            self._PLATFORMS.search(text) or self._URL_RE.search(text) or self._PHONE_RE.search(text)
         )
         if spam_hit:
             return "spam", 0.9, "rule: promotional / monetary keyword"
