@@ -206,7 +206,58 @@ DeepSeek в 5–10 раз дешевле OpenAI, для модерации эт�
 
 ---
 
-## Шаг 7. Подменить датасет на свой
+## Шаг 7. Запустить как сервис (HTTP API)
+
+Если нужно дёргать модератор не батчем, а из другого приложения
+(сайт, бот, бекенд) — есть HTTP-эндпоинт:
+
+```bash
+pip install -r requirements.txt
+# выбрать провайдер в config.yaml + выставить нужный API-ключ, как в Шаге 6
+uvicorn src.api:app --host 0.0.0.0 --port 8000
+```
+
+Откройте в браузере **http://localhost:8000/docs** — там Swagger UI, в
+котором можно тыкать кнопками без терминала и curl-ов.
+
+**Эндпоинты:**
+
+| Метод и путь              | Что отправлять                              | Что вернёт                                |
+|---------------------------|---------------------------------------------|-------------------------------------------|
+| `GET  /`                  | —                                           | информация о сервисе                      |
+| `GET  /health`            | —                                           | `{status, model_type, model_name, ...}`   |
+| `POST /moderate`          | `{"text": "..."}`                           | вердикт + категория + confidence + reason |
+| `POST /moderate/batch`    | `{"texts": ["...", "..."]}` (до 64 штук)    | массив тех же ответов                     |
+
+**Пример (PowerShell):**
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8000/moderate `
+  -ContentType 'application/json' `
+  -Body '{"text":"добавь меня в инсте @user, тут чат лагает"}'
+```
+
+**Пример (curl, macOS / Linux / Git Bash):**
+
+```bash
+curl -s -X POST http://localhost:8000/moderate \
+     -H 'Content-Type: application/json' \
+     -d '{"text":"добавь меня в инсте @user, тут чат лагает"}'
+```
+
+Должен вернуть что-то вроде:
+```json
+{"verdict":"BLOCK","category":"gray_platform_switch","confidence":0.85,"reason":"…","parse_ok":true,"raw":"…"}
+```
+
+**Защита токеном (опционально).** Если выставить переменную окружения
+`API_AUTH_TOKEN=<секрет>`, то к каждому запросу `/moderate*` нужно
+будет добавлять заголовок `Authorization: Bearer <секрет>` —
+без него сервис вернёт `401 Unauthorized`. `/health` всегда открыт,
+чтобы liveness-probes Docker / Kubernetes / hosting не ломались.
+
+## Шаг 8. Подменить датасет на свой
 
 В файле `data/sample_dataset.jsonl` лежит 10 примеров. Это формат **JSONL** —
 по одной JSON-строке на пример:

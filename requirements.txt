@@ -4,3 +4,8 @@ PyYAML>=6.0.2
 openai>=1.54.0
 # Optional — only needed when config.model_type = "anthropic".
 anthropic>=0.40.0
+# HTTP service (`uvicorn src.api:app`). FastAPI pulls in pydantic and
+# starlette; uvicorn[standard] adds the C-accelerated event loop and
+# websocket extras (handy for the auto-generated /docs UI).
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
