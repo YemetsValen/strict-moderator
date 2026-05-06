@@ -90,6 +90,31 @@ on the command line:
 python -m src.main --dataset data/my_data.jsonl --model-type openai --output reports/openai.json
 ```
 
+## Async fan-out and cost tracking
+
+The CLI runs the **async pipeline by default** — every example is a
+coroutine, dispatched via `asyncio.gather` under an
+`asyncio.Semaphore(concurrency)`. Tune the cap in `config.yaml`
+(`concurrency: 8`) or per-run with `--concurrency 32`. Pass `--sync` to
+fall back to the historical sequential path (mostly for debugging).
+
+Token usage and a USD cost estimate are reported automatically when the
+provider populates `usage` (OpenAI's `prompt_tokens` / `completion_tokens`
+and Anthropic's `input_tokens` / `output_tokens` are normalised under the
+hood). Pricing lives in `src/cost.py` — unknown models simply omit the
+dollar figure rather than crashing.
+
+```text
+  Prompt tokens       : 12431
+  Completion tokens   : 3210
+  Total tokens        : 15641
+  Estimated cost      : $0.014230
+  Cost / 1k messages  : $1.42
+```
+
+The same fields are surfaced in `reports/last_run.json` (`summary.*`) and
+in the `/moderate` / `/moderate/batch` HTTP responses (`usage`).
+
 ## HTTP service (FastAPI)
 
 The same provider stack is also exposed as an HTTP API for use from other

@@ -45,6 +45,12 @@ max_tokens: 200
 # How long to wait for the model before giving up on a single example.
 request_timeout_seconds: 30
 
+# Max in-flight requests when running async (default mode of `python -m
+# src.main` and the FastAPI batch endpoint). Higher = faster runs, but
+# providers rate-limit somewhere around 50–500 RPM, and exceeding that
+# yields HTTP 429s instead of speed. Override per-run with --concurrency.
+concurrency: 8
+
 # --- Labels ---
 # Every label that may appear in the dataset OR be returned by the model.
 # Adding a new category = appending to this list (no code changes needed).

@@ -34,6 +34,10 @@ class Config:
     # Optional override for OpenAI-compatible providers (DeepSeek, OpenRouter,
     # Together, local Ollama, …). Empty string means "use the SDK default".
     base_url: str
+    # Max in-flight requests for ``evaluate_async`` and ``/moderate/batch``.
+    # Set conservatively — most providers rate-limit somewhere around 50-500
+    # RPM; pushing above that yields HTTP 429s, not faster runs.
+    concurrency: int
 
     labels: list[str]
     block_labels: list[str]
@@ -60,6 +64,7 @@ class Config:
                 max_tokens=int(raw.get("max_tokens", 200)),
                 request_timeout_seconds=float(raw.get("request_timeout_seconds", 30)),
                 base_url=str(raw.get("base_url", "") or ""),
+                concurrency=max(1, int(raw.get("concurrency", 8))),
                 labels=list(raw["labels"]),
                 block_labels=list(raw["block_labels"]),
                 metrics=list(raw.get("metrics", ["accuracy"])),
