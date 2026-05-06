@@ -21,10 +21,11 @@ prompt that is hardened against simple jailbreak attacks.
 ├── prompts/
 │   └── system_prompt.txt        # the moderator's system prompt
 ├── src/
-│   ├── main.py                  # CLI entry point
+│   ├── main.py                  # CLI entry point (batch evaluation)
+│   ├── api.py                   # FastAPI HTTP service
 │   ├── evaluator.py             # dataset → predictions → metrics
 │   ├── metrics.py               # accuracy/precision/recall/F1 from scratch
-│   ├── model.py                 # OpenAI + mock providers (Strategy pattern)
+│   ├── model.py                 # OpenAI + Anthropic + mock providers
 │   └── utils.py                 # config, JSONL I/O, robust JSON parsing
 ├── tests/                       # pytest unit + jailbreak tests
 ├── config.yaml                  # everything you can tune lives here
@@ -88,6 +89,48 @@ on the command line:
 ```bash
 python -m src.main --dataset data/my_data.jsonl --model-type openai --output reports/openai.json
 ```
+
+## HTTP service (FastAPI)
+
+The same provider stack is also exposed as an HTTP API for use from other
+services / front-ends:
+
+```bash
+pip install -r requirements.txt
+# pick a provider in config.yaml + export the matching API key, then:
+uvicorn src.api:app --host 0.0.0.0 --port 8000
+# or:
+python -m src.api --host 0.0.0.0 --port 8000 --reload
+```
+
+Open http://localhost:8000/docs for the auto-generated Swagger UI.
+
+| Method & path           | Body                                  | Returns                                      |
+|-------------------------|---------------------------------------|----------------------------------------------|
+| `GET /`                 | —                                     | Service info (version, links to /docs)       |
+| `GET /health`           | —                                     | `{status, model_type, model_name, ...}`      |
+| `POST /moderate`        | `{"text": "..."}`                     | `{verdict, category, confidence, reason, …}` |
+| `POST /moderate/batch`  | `{"texts": ["...", "..."]}` (≤ 64)    | `{"results": [...]}`                         |
+
+Example:
+
+```bash
+curl -s -X POST http://localhost:8000/moderate \
+     -H 'Content-Type: application/json' \
+     -d '{"text":"hey, message me on whatsapp +380501234567"}'
+# → {"verdict":"BLOCK","category":"gray_platform_switch","confidence":0.85,...}
+```
+
+**Optional bearer auth.** Set `API_AUTH_TOKEN=<secret>` in the environment
+and every `/moderate*` request must carry `Authorization: Bearer <secret>`.
+`/health` is always open so liveness/readiness probes don't need a token.
+Leave `API_AUTH_TOKEN` unset for local dev — the API will accept all
+requests.
+
+The service loads `config.yaml`, the system prompt, and the chosen
+provider **once at startup** via FastAPI's `lifespan` hook, so each
+request is just one provider call plus JSON parsing. Override the config
+path with `MODERATOR_CONFIG=/path/to/config.yaml`.
 
 ## Example output
 

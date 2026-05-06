@@ -1,0 +1,158 @@
+"""Tests for src.api — the FastAPI wrapper.
+
+Uses ``MockProvider`` so tests don't hit any real network. Bearer-token
+auth is exercised by toggling ``API_AUTH_TOKEN`` via monkeypatch.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import src.api as api_module
+from src.api import app
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """A TestClient with the lifespan hook bootstrapped from config.yaml.
+
+    config.yaml ships with model_type=mock, so the fake provider is
+    deterministic and offline.
+    """
+    monkeypatch.delenv("API_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("MODERATOR_CONFIG", str(Path("config.yaml").resolve()))
+    with TestClient(app) as c:
+        yield c
+
+
+def test_root_returns_service_info(client: TestClient) -> None:
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["service"] == "strict-moderator"
+    assert body["docs_url"] == "/docs"
+
+
+def test_health_reports_loaded_model(client: TestClient) -> None:
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["model_type"] == "mock"
+    assert body["auth_required"] is False
+
+
+def test_moderate_classifies_clean_message(client: TestClient) -> None:
+    resp = client.post("/moderate", json={"text": "Привет, как дела?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] in {"ALLOW", "BLOCK"}
+    assert body["category"] in {
+        "ok",
+        "spam",
+        "gray_platform_switch",
+        "hidden_aggression",
+        "other",
+    }
+    assert 0.0 <= body["confidence"] <= 1.0
+    assert body["parse_ok"] is True
+
+
+def test_moderate_blocks_obvious_spam(client: TestClient) -> None:
+    resp = client.post(
+        "/moderate",
+        json={"text": "Earn $5000/week guaranteed — DM me CRYPTO for free signals"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] == "BLOCK"
+
+
+def test_moderate_blocks_platform_switch(client: TestClient) -> None:
+    resp = client.post(
+        "/moderate",
+        json={"text": "Hey, message me on whatsapp +380 67 123 45 67"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] == "BLOCK"
+    assert body["category"] == "gray_platform_switch"
+
+
+def test_moderate_rejects_empty_text(client: TestClient) -> None:
+    resp = client.post("/moderate", json={"text": ""})
+    assert resp.status_code == 422  # FastAPI validation error
+
+
+def test_moderate_rejects_oversized_text(client: TestClient) -> None:
+    big = "x" * (api_module.MAX_TEXT_LENGTH + 1)
+    resp = client.post("/moderate", json={"text": big})
+    assert resp.status_code == 422
+
+
+def test_batch_moderation_returns_one_result_per_input(client: TestClient) -> None:
+    resp = client.post(
+        "/moderate/batch",
+        json={"texts": ["Hi there!", "Earn $5000 in crypto", "Привет :)"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["results"]) == 3
+    for item in body["results"]:
+        assert item["verdict"] in {"ALLOW", "BLOCK"}
+        assert "category" in item
+
+
+def test_batch_rejects_empty_list(client: TestClient) -> None:
+    resp = client.post("/moderate/batch", json={"texts": []})
+    assert resp.status_code == 422
+
+
+def test_batch_rejects_oversized_batch(client: TestClient) -> None:
+    texts = ["msg"] * (api_module.MAX_BATCH_SIZE + 1)
+    resp = client.post("/moderate/batch", json={"texts": texts})
+    assert resp.status_code == 422
+
+
+# ---------- auth ----------
+@pytest.fixture
+def auth_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    monkeypatch.setenv("API_AUTH_TOKEN", "supersecret")
+    monkeypatch.setenv("MODERATOR_CONFIG", str(Path("config.yaml").resolve()))
+    with TestClient(app) as c:
+        yield c
+
+
+def test_health_does_not_require_auth(auth_client: TestClient) -> None:
+    """Liveness probes from k8s/Docker mustn't need a token."""
+    resp = auth_client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["auth_required"] is True
+
+
+def test_moderate_requires_auth_when_token_set(auth_client: TestClient) -> None:
+    resp = auth_client.post("/moderate", json={"text": "Hi"})
+    assert resp.status_code == 401
+
+
+def test_moderate_rejects_wrong_bearer(auth_client: TestClient) -> None:
+    resp = auth_client.post(
+        "/moderate",
+        json={"text": "Hi"},
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert resp.status_code == 401
+
+
+def test_moderate_accepts_correct_bearer(auth_client: TestClient) -> None:
+    resp = auth_client.post(
+        "/moderate",
+        json={"text": "Hi"},
+        headers={"Authorization": "Bearer supersecret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["verdict"] in {"ALLOW", "BLOCK"}
