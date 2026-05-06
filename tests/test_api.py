@@ -118,6 +118,20 @@ def test_batch_rejects_oversized_batch(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+def test_batch_rejects_empty_string_item(client: TestClient) -> None:
+    """Per-item min_length=1 mirrors the single endpoint so empty strings
+    in a batch are rejected up-front instead of hitting the LLM."""
+    resp = client.post("/moderate/batch", json={"texts": ["valid", "", "also valid"]})
+    assert resp.status_code == 422
+
+
+def test_batch_rejects_oversized_string_item(client: TestClient) -> None:
+    """Per-item max_length=MAX_TEXT_LENGTH bounds resource use."""
+    big = "x" * (api_module.MAX_TEXT_LENGTH + 1)
+    resp = client.post("/moderate/batch", json={"texts": ["short", big]})
+    assert resp.status_code == 422
+
+
 # ---------- auth ----------
 @pytest.fixture
 def auth_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:

@@ -61,9 +61,14 @@ class ModerateRequest(BaseModel):
 
 
 class BatchModerateRequest(BaseModel):
-    """Input for ``POST /moderate/batch``."""
+    """Input for ``POST /moderate/batch``.
 
-    texts: list[str] = Field(
+    Per-item ``min_length`` / ``max_length`` constraints mirror the single
+    endpoint so a malformed item in a batch fails fast with 422 instead of
+    silently hitting the LLM with empty / oversized strings.
+    """
+
+    texts: list[Annotated[str, Field(min_length=1, max_length=MAX_TEXT_LENGTH)]] = Field(
         ...,
         min_length=1,
         max_length=MAX_BATCH_SIZE,
