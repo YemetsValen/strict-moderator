@@ -61,7 +61,12 @@ smoke:
 
 workflow:
   rules:
-    # Run on every push to a branch …
-    - if: $CI_PIPELINE_SOURCE == "push"
-    # … and on every merge request.
+    # Always run for merge-request events.
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # When a branch has an open MR, skip the redundant branch-push pipeline
+    # so we don't run two identical pipelines for the same commit.
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    # Otherwise, run on plain branch pushes (e.g. default branch, branches
+    # without an open MR yet).
+    - if: $CI_COMMIT_BRANCH
