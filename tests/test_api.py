@@ -60,6 +60,11 @@ def test_moderate_classifies_clean_message(client: TestClient) -> None:
     }
     assert 0.0 <= body["confidence"] <= 1.0
     assert body["parse_ok"] is True
+    # Mock provider reports zero tokens; the field must still be present.
+    assert "usage" in body
+    assert body["usage"]["prompt_tokens"] == 0
+    assert body["usage"]["completion_tokens"] == 0
+    assert body["usage"]["total_tokens"] == 0
 
 
 def test_moderate_blocks_obvious_spam(client: TestClient) -> None:
