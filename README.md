@@ -1,5 +1,9 @@
 # Moderator
 
+> 🇷🇺 **Не разработчик?** Пошаговая инструкция для запуска "из коробки" —
+> [INSTRUCTIONS_RU.md](INSTRUCTIONS_RU.md). Подходит для запуска на любой ОС
+> без опыта работы с терминалом.
+
 A flexible evaluation framework for **LLM-based content moderation**.
 Plug in a JSONL dataset, pick a model provider, and run accuracy /
 precision / recall / F1 — with optional **macro / micro / weighted**
