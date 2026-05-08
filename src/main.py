@@ -18,6 +18,7 @@ from typing import Any
 from src.cost import format_cost
 from src.evaluator import EvaluationReport, evaluate, evaluate_async, report_to_dict
 from src.model import build_provider
+from src.summary_md import write_summary_md
 from src.utils import Config, configure_logging, load_jsonl, write_json
 
 log = logging.getLogger("moderator")
@@ -80,6 +81,7 @@ def _apply_overrides(config: Config, args: argparse.Namespace) -> Config:
         request_timeout_seconds=config.request_timeout_seconds,
         base_url=config.base_url,
         concurrency=args.concurrency if args.concurrency is not None else config.concurrency,
+        confidence_threshold=config.confidence_threshold,
         labels=list(config.labels),
         block_labels=list(config.block_labels),
         metrics=list(config.metrics),
@@ -121,6 +123,7 @@ def _print_summary(report: EvaluationReport) -> None:
     print(f"  Category accuracy   : {s['category_correct']}/{s['n_examples']}")
     print(f"  Verdict accuracy    : {s['verdict_accuracy']:.3f}")
     print(f"  Block recall        : {s['block_recall']:.3f}")
+    print(f"  Review queue        : {s['review_count']} ({s['review_rate'] * 100:.1f}%)")
     print(f"  Parse failures      : {s['parse_failures']}")
     print(f"  Duration (sec)      : {s['duration_seconds']}")
     print(f"  Prompt tokens       : {s['total_prompt_tokens']}")
@@ -153,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
     _print_summary(report)
     write_json(config.output_path, report_to_dict(report))
     log.info("report written to %s", config.output_path)
+
+    # Per-run ``summary.md`` lives next to the JSON so the two files stay in
+    # sync with the same timestamp and can be opened side-by-side.
+    summary_path = config.output_path.with_name("summary.md")
+    write_summary_md(summary_path, report, dataset_path=config.dataset_path)
+    log.info("summary written to %s", summary_path)
     return 0
 
 

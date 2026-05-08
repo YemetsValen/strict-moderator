@@ -46,7 +46,20 @@ python -m src.main --config config.yaml
 
 By default `config.yaml` uses the **mock provider** — a deterministic
 rule-based classifier that needs no API key. Output is written to
-`reports/last_run.json` and a summary is printed to stdout.
+`reports/last_run.json` (machine-readable) **and** `reports/summary.md`
+(human-readable — headline metrics, cost, plus concrete examples the
+model got wrong or flagged as low-confidence), and a summary is also
+printed to stdout.
+
+### Confidence threshold & human review
+
+The framework supports a **REVIEW tier**: when the model's confidence is
+below `confidence_threshold` (default `0.5` in `config.yaml`), the
+response's `final_verdict` is set to `REVIEW` instead of `ALLOW`/`BLOCK`,
+so callers can route the message to a human moderator instead of acting
+on a shaky LLM decision. The `verdict` field still carries the model's
+raw call for debugging and metric fairness. Set `confidence_threshold:
+0.0` to disable the tier (old binary behaviour).
 
 ### Picking a provider
 

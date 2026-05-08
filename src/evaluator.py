@@ -30,15 +30,29 @@ from src.utils import Config, Example
 log = logging.getLogger(__name__)
 
 
+# Final decision tier. We deliberately keep ``REVIEW`` out of the classification
+# label space — it's a routing decision on top of the model's output, not a
+# category the model ever returns. All metric computations still use the 5
+# configured categories so precision/recall/F1 don't drift when the threshold
+# changes.
+REVIEW_VERDICT = "REVIEW"
+
+
 @dataclass(frozen=True)
 class Prediction:
-    """A single example + the model's response, ready for serialisation."""
+    """A single example + the model's response, ready for serialisation.
+
+    ``predicted_verdict`` is what the model said (ALLOW/BLOCK); ``final_verdict``
+    is what downstream consumers should act on — it equals ``predicted_verdict``
+    when confidence ≥ threshold and ``REVIEW`` otherwise.
+    """
 
     text: str
     expected_label: str
     expected_verdict: str
     predicted_category: str
     predicted_verdict: str
+    final_verdict: str
     confidence: float
     reason: str
     parse_ok: bool
@@ -59,14 +73,27 @@ def _expected_verdict(label: str, block_labels: list[str]) -> str:
     return "BLOCK" if label in block_labels else "ALLOW"
 
 
-def _make_prediction(ex: Example, out: ModelOutput, block_labels: list[str]) -> Prediction:
-    expected_v = _expected_verdict(ex.label, block_labels)
+def resolve_final_verdict(model_verdict: str, confidence: float, threshold: float) -> str:
+    """Apply the confidence threshold — below it, defer to a human.
+
+    A threshold of 0.0 turns the REVIEW tier off entirely (useful for unit
+    tests and anyone who wants the old binary behaviour).
+    """
+    if threshold > 0.0 and confidence < threshold:
+        return REVIEW_VERDICT
+    return model_verdict
+
+
+def _make_prediction(ex: Example, out: ModelOutput, config: Config) -> Prediction:
+    expected_v = _expected_verdict(ex.label, config.block_labels)
+    final_v = resolve_final_verdict(out.verdict, float(out.confidence), config.confidence_threshold)
     return Prediction(
         text=ex.text,
         expected_label=ex.label,
         expected_verdict=expected_v,
         predicted_category=out.category,
         predicted_verdict=out.verdict,
+        final_verdict=final_v,
         confidence=float(out.confidence),
         reason=out.reason,
         parse_ok=out.parse_ok,
@@ -112,6 +139,7 @@ def _build_report(
     # into running over a different label space.
     verdict_correct = sum(1 for p in predictions if p.predicted_verdict == p.expected_verdict)
     block_recall = _block_recall(predictions)
+    review_count = sum(1 for p in predictions if p.final_verdict == REVIEW_VERDICT)
 
     total_prompt_tokens = sum(p.prompt_tokens for p in predictions)
     total_completion_tokens = sum(p.completion_tokens for p in predictions)
@@ -132,6 +160,9 @@ def _build_report(
         "verdict_correct": verdict_correct,
         "verdict_accuracy": verdict_correct / total if total else 0.0,
         "block_recall": block_recall,
+        "review_count": review_count,
+        "review_rate": review_count / total if total else 0.0,
+        "confidence_threshold": config.confidence_threshold,
         "total_prompt_tokens": total_prompt_tokens,
         "total_completion_tokens": total_completion_tokens,
         "total_tokens": total_prompt_tokens + total_completion_tokens,
@@ -144,6 +175,7 @@ def _build_report(
         "model_name": config.model_name,
         "temperature": config.temperature,
         "concurrency": config.concurrency,
+        "confidence_threshold": config.confidence_threshold,
         "labels": list(config.labels),
         "block_labels": list(config.block_labels),
         "metrics": list(config.metrics),
@@ -180,7 +212,7 @@ def evaluate(
     total = len(examples)
     for i, ex in enumerate(examples, start=1):
         out = provider.call(system_prompt, ex.text)
-        pred = _make_prediction(ex, out, config.block_labels)
+        pred = _make_prediction(ex, out, config)
         predictions.append(pred)
         if config.verbose:
             _print_progress(i, total, ex, pred)
@@ -222,7 +254,7 @@ async def evaluate_async(
         nonlocal completed
         async with sem:
             out = await provider.acall(system_prompt, ex.text)
-        pred = _make_prediction(ex, out, config.block_labels)
+        pred = _make_prediction(ex, out, config)
         results[i] = pred
         async with completed_lock:
             completed += 1

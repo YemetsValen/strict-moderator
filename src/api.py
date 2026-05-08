@@ -40,6 +40,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from src.cost import estimate_cost
+from src.evaluator import resolve_final_verdict
 from src.model import ModelOutput, ModelProvider, build_provider
 from src.utils import Config, configure_logging
 
@@ -93,11 +94,31 @@ class UsageInfo(BaseModel):
 
 
 class ModerateResponse(BaseModel):
-    """Normalised model reply, returned by both endpoints."""
+    """Normalised model reply, returned by both endpoints.
 
-    verdict: str = Field(..., description="``ALLOW`` or ``BLOCK``.")
+    ``verdict`` is what the model said (``ALLOW``/``BLOCK``). ``final_verdict``
+    is what callers should act on — ``REVIEW`` when confidence fell below
+    ``confidence_threshold`` in ``config.yaml`` (route to a human queue),
+    otherwise it equals ``verdict``.
+    """
+
+    verdict: str = Field(..., description="``ALLOW`` or ``BLOCK`` — model's raw decision.")
+    final_verdict: str = Field(
+        ...,
+        description=(
+            "``ALLOW``, ``BLOCK`` or ``REVIEW``. Use this field for routing — "
+            "``REVIEW`` means the model's confidence was below the configured "
+            "threshold and the message should be sent to a human."
+        ),
+    )
     category: str = Field(..., description="One of the labels in config.yaml.")
     confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence_threshold: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Threshold applied to derive ``final_verdict``.",
+    )
     reason: str = Field(..., description="Short human-readable rationale.")
     parse_ok: bool = Field(
         ...,
@@ -123,6 +144,12 @@ class HealthResponse(BaseModel):
     model_type: str
     model_name: str
     base_url: str = Field("", description="Set when using an OpenAI-compatible endpoint.")
+    confidence_threshold: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence below which the service returns final_verdict=REVIEW.",
+    )
     auth_required: bool
 
 
@@ -208,11 +235,19 @@ def _usage_for(prompt_tokens: int, completion_tokens: int) -> UsageInfo:
     )
 
 
+def _confidence_threshold() -> float:
+    return _state.config.confidence_threshold if _state.config is not None else 0.0
+
+
 def _to_response(out: ModelOutput) -> ModerateResponse:
+    threshold = _confidence_threshold()
+    final_v = resolve_final_verdict(out.verdict, float(out.confidence), threshold)
     return ModerateResponse(
         verdict=out.verdict,
+        final_verdict=final_v,
         category=out.category,
         confidence=out.confidence,
+        confidence_threshold=threshold,
         reason=out.reason,
         parse_ok=out.parse_ok,
         raw=out.raw,
@@ -261,6 +296,7 @@ def health() -> HealthResponse:
         model_type=config.model_type,
         model_name=config.model_name,
         base_url=config.base_url,
+        confidence_threshold=config.confidence_threshold,
         auth_required=bool(os.getenv("API_AUTH_TOKEN", "").strip()),
     )
 

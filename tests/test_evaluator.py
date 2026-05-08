@@ -204,3 +204,86 @@ def test_sync_evaluate_still_works_with_token_fields() -> None:
     report = evaluate(examples, provider=provider, system_prompt="sys", config=cfg)
     assert report.summary["total_tokens"] == 0  # mock provider reports zero
     assert all(p.prompt_tokens == 0 for p in report.predictions)
+
+
+# ---------- confidence threshold / REVIEW queue ----------
+
+
+class _FixedConfidenceProvider(ModelProvider):
+    """Returns ALLOW/ok with a caller-chosen confidence, for threshold tests."""
+
+    def __init__(self, confidence: float) -> None:
+        self._conf = confidence
+
+    def call(self, system_prompt: str, text: str) -> ModelOutput:
+        return ModelOutput(
+            verdict="ALLOW",
+            category="ok",
+            confidence=self._conf,
+            reason="fixed",
+            raw="",
+            parse_ok=True,
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    async def acall(self, system_prompt: str, text: str) -> ModelOutput:
+        return self.call(system_prompt, text)
+
+
+def test_low_confidence_routes_to_review_tier() -> None:
+    """Below-threshold confidence → final_verdict=REVIEW even when model said ALLOW."""
+    from src.evaluator import REVIEW_VERDICT
+
+    cfg = Config.from_file(REPO_ROOT / "config.yaml")
+    cfg = _clone_config(cfg, verbose=False, confidence_threshold=0.8)
+    provider = _FixedConfidenceProvider(confidence=0.3)
+    examples = _examples(4)
+
+    report = evaluate(examples, provider=provider, system_prompt="sys", config=cfg)
+    assert all(p.final_verdict == REVIEW_VERDICT for p in report.predictions)
+    # Model-level verdict is preserved untouched for debugging / metric fairness.
+    assert all(p.predicted_verdict == "ALLOW" for p in report.predictions)
+    assert report.summary["review_count"] == 4
+    assert report.summary["review_rate"] == 1.0
+    assert report.summary["confidence_threshold"] == 0.8
+
+
+def test_high_confidence_keeps_model_verdict() -> None:
+    """At/above threshold the final_verdict equals the model's raw verdict."""
+    cfg = Config.from_file(REPO_ROOT / "config.yaml")
+    cfg = _clone_config(cfg, verbose=False, confidence_threshold=0.5)
+    provider = _FixedConfidenceProvider(confidence=0.95)
+    examples = _examples(3)
+
+    report = evaluate(examples, provider=provider, system_prompt="sys", config=cfg)
+    assert all(p.final_verdict == "ALLOW" for p in report.predictions)
+    assert report.summary["review_count"] == 0
+    assert report.summary["review_rate"] == 0.0
+
+
+def test_threshold_zero_disables_review_tier() -> None:
+    """Threshold 0.0 is the old binary behaviour — no REVIEW ever."""
+    cfg = Config.from_file(REPO_ROOT / "config.yaml")
+    cfg = _clone_config(cfg, verbose=False, confidence_threshold=0.0)
+    provider = _FixedConfidenceProvider(confidence=0.0)
+    examples = _examples(3)
+
+    report = evaluate(examples, provider=provider, system_prompt="sys", config=cfg)
+    assert all(p.final_verdict == "ALLOW" for p in report.predictions)
+    assert report.summary["review_count"] == 0
+
+
+def test_review_tier_does_not_pollute_classification_metrics() -> None:
+    """REVIEW is a routing-only tier; precision/recall must be computed on
+    the model's raw category predictions, not on the verdict tier."""
+    cfg = Config.from_file(REPO_ROOT / "config.yaml")
+    cfg = _clone_config(cfg, verbose=False, confidence_threshold=0.99)
+    provider = _FixedConfidenceProvider(confidence=0.5)
+    examples = _examples(5)
+
+    report = evaluate(examples, provider=provider, system_prompt="sys", config=cfg)
+    # Every final_verdict should be REVIEW
+    assert report.summary["review_count"] == 5
+    # But ok-category predictions on ok-label data → perfect category accuracy.
+    assert report.summary["category_correct"] == 5

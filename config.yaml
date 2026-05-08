@@ -51,6 +51,14 @@ request_timeout_seconds: 30
 # yields HTTP 429s instead of speed. Override per-run with --concurrency.
 concurrency: 8
 
+# --- Human-in-the-loop ---
+# When the model's confidence drops below this value we don't trust it to
+# auto-decide and instead flag the message with final_verdict=REVIEW, which
+# the caller should route to a human moderation queue. Set to 0.0 to turn
+# the REVIEW tier off (every decision is final — old behaviour).
+# Reasonable range: 0.4–0.7 depending on how risk-averse the platform is.
+confidence_threshold: 0.5
+
 # --- Labels ---
 # Every label that may appear in the dataset OR be returned by the model.
 # Adding a new category = appending to this list (no code changes needed).

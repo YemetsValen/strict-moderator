@@ -38,6 +38,10 @@ class Config:
     # Set conservatively — most providers rate-limit somewhere around 50-500
     # RPM; pushing above that yields HTTP 429s, not faster runs.
     concurrency: int
+    # Below this confidence, we don't trust the model enough to auto-ALLOW or
+    # auto-BLOCK and instead route the message to human moderation. Set to 0.0
+    # to disable the REVIEW tier entirely (every decision is final).
+    confidence_threshold: float
 
     labels: list[str]
     block_labels: list[str]
@@ -65,6 +69,9 @@ class Config:
                 request_timeout_seconds=float(raw.get("request_timeout_seconds", 30)),
                 base_url=str(raw.get("base_url", "") or ""),
                 concurrency=max(1, int(raw.get("concurrency", 8))),
+                confidence_threshold=max(
+                    0.0, min(1.0, float(raw.get("confidence_threshold", 0.5)))
+                ),
                 labels=list(raw["labels"]),
                 block_labels=list(raw["block_labels"]),
                 metrics=list(raw.get("metrics", ["accuracy"])),
