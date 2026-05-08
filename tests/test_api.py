@@ -213,9 +213,7 @@ def test_review_tier_triggered_when_threshold_above_mock_confidence(
     with TestClient(app) as raw_client:
         # Monkey-patch the loaded config in place to a very strict threshold.
         assert api_module._state.config is not None
-        api_module._state.config = replace(
-            api_module._state.config, confidence_threshold=0.999
-        )
+        api_module._state.config = replace(api_module._state.config, confidence_threshold=0.999)
         try:
             resp = raw_client.post("/moderate", json={"text": "hello"})
             assert resp.status_code == 200

@@ -130,9 +130,7 @@ def render_summary_md(
     lines.append(f"| Estimated cost | {format_cost(s['estimated_cost_usd'])} |")
     lines.append(f"| Cost per 1 000 messages | {format_cost(s['cost_per_1k_messages_usd'])} |")
     cost_per_1m = (
-        s["cost_per_1k_messages_usd"] * 1000
-        if s["cost_per_1k_messages_usd"] is not None
-        else None
+        s["cost_per_1k_messages_usd"] * 1000 if s["cost_per_1k_messages_usd"] is not None else None
     )
     lines.append(f"| Cost per 1 000 000 messages | {format_cost(cost_per_1m)} |")
     lines.append("")
