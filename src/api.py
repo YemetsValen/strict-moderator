@@ -27,6 +27,7 @@ Run
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -38,6 +39,8 @@ from typing import Annotated, Final
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
+from src.cost import estimate_cost
+from src.evaluator import resolve_final_verdict
 from src.model import ModelOutput, ModelProvider, build_provider
 from src.utils import Config, configure_logging
 
@@ -76,12 +79,46 @@ class BatchModerateRequest(BaseModel):
     )
 
 
-class ModerateResponse(BaseModel):
-    """Normalised model reply, returned by both endpoints."""
+class UsageInfo(BaseModel):
+    """Token counts + estimated USD cost reported by the provider."""
 
-    verdict: str = Field(..., description="``ALLOW`` or ``BLOCK``.")
+    prompt_tokens: int = Field(0, ge=0)
+    completion_tokens: int = Field(0, ge=0)
+    total_tokens: int = Field(0, ge=0)
+    estimated_cost_usd: float | None = Field(
+        None,
+        description=(
+            "Estimated USD cost for this call. Null when the model isn't in the price table."
+        ),
+    )
+
+
+class ModerateResponse(BaseModel):
+    """Normalised model reply, returned by both endpoints.
+
+    ``verdict`` is what the model said (``ALLOW``/``BLOCK``). ``final_verdict``
+    is what callers should act on — ``REVIEW`` when confidence fell below
+    ``confidence_threshold`` in ``config.yaml`` (route to a human queue),
+    otherwise it equals ``verdict``.
+    """
+
+    verdict: str = Field(..., description="``ALLOW`` or ``BLOCK`` — model's raw decision.")
+    final_verdict: str = Field(
+        ...,
+        description=(
+            "``ALLOW``, ``BLOCK`` or ``REVIEW``. Use this field for routing — "
+            "``REVIEW`` means the model's confidence was below the configured "
+            "threshold and the message should be sent to a human."
+        ),
+    )
     category: str = Field(..., description="One of the labels in config.yaml.")
     confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence_threshold: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Threshold applied to derive ``final_verdict``.",
+    )
     reason: str = Field(..., description="Short human-readable rationale.")
     parse_ok: bool = Field(
         ...,
@@ -91,10 +128,15 @@ class ModerateResponse(BaseModel):
         "",
         description="Raw model reply (kept for debugging; empty in many fallback paths).",
     )
+    usage: UsageInfo = Field(default_factory=UsageInfo)
 
 
 class BatchModerateResponse(BaseModel):
     results: list[ModerateResponse]
+    usage: UsageInfo = Field(
+        default_factory=UsageInfo,
+        description="Aggregated tokens + cost across every item in the batch.",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -102,6 +144,12 @@ class HealthResponse(BaseModel):
     model_type: str
     model_name: str
     base_url: str = Field("", description="Set when using an OpenAI-compatible endpoint.")
+    confidence_threshold: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence below which the service returns final_verdict=REVIEW.",
+    )
     auth_required: bool
 
 
@@ -170,14 +218,40 @@ def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
 
 
 # ---------- core helpers ----------
+def _model_name() -> str:
+    return _state.config.model_name if _state.config is not None else ""
+
+
+def _usage_for(prompt_tokens: int, completion_tokens: int) -> UsageInfo:
+    return UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        estimated_cost_usd=estimate_cost(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model_name=_model_name(),
+        ),
+    )
+
+
+def _confidence_threshold() -> float:
+    return _state.config.confidence_threshold if _state.config is not None else 0.0
+
+
 def _to_response(out: ModelOutput) -> ModerateResponse:
+    threshold = _confidence_threshold()
+    final_v = resolve_final_verdict(out.verdict, float(out.confidence), threshold)
     return ModerateResponse(
         verdict=out.verdict,
+        final_verdict=final_v,
         category=out.category,
         confidence=out.confidence,
+        confidence_threshold=threshold,
         reason=out.reason,
         parse_ok=out.parse_ok,
         raw=out.raw,
+        usage=_usage_for(out.prompt_tokens, out.completion_tokens),
     )
 
 
@@ -222,6 +296,7 @@ def health() -> HealthResponse:
         model_type=config.model_type,
         model_name=config.model_name,
         base_url=config.base_url,
+        confidence_threshold=config.confidence_threshold,
         auth_required=bool(os.getenv("API_AUTH_TOKEN", "").strip()),
     )
 
@@ -232,8 +307,8 @@ def health() -> HealthResponse:
     tags=["moderate"],
     dependencies=[Depends(require_auth)],
 )
-def moderate(req: ModerateRequest) -> ModerateResponse:
-    out = _provider().call(_state.system_prompt, req.text)
+async def moderate(req: ModerateRequest) -> ModerateResponse:
+    out = await _provider().acall(_state.system_prompt, req.text)
     return _to_response(out)
 
 
@@ -243,10 +318,24 @@ def moderate(req: ModerateRequest) -> ModerateResponse:
     tags=["moderate"],
     dependencies=[Depends(require_auth)],
 )
-def moderate_batch(req: BatchModerateRequest) -> BatchModerateResponse:
+async def moderate_batch(req: BatchModerateRequest) -> BatchModerateResponse:
     provider = _provider()
-    results = [_to_response(provider.call(_state.system_prompt, t)) for t in req.texts]
-    return BatchModerateResponse(results=results)
+    config = _state.config
+    cap = max(1, config.concurrency) if config is not None else 8
+    sem = asyncio.Semaphore(cap)
+
+    async def _one(text: str) -> ModelOutput:
+        async with sem:
+            return await provider.acall(_state.system_prompt, text)
+
+    outputs = await asyncio.gather(*[_one(t) for t in req.texts])
+    results = [_to_response(o) for o in outputs]
+    total_prompt = sum(o.prompt_tokens for o in outputs)
+    total_completion = sum(o.completion_tokens for o in outputs)
+    return BatchModerateResponse(
+        results=results,
+        usage=_usage_for(total_prompt, total_completion),
+    )
 
 
 # ---------- module entrypoint ----------

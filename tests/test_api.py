@@ -60,6 +60,11 @@ def test_moderate_classifies_clean_message(client: TestClient) -> None:
     }
     assert 0.0 <= body["confidence"] <= 1.0
     assert body["parse_ok"] is True
+    # Mock provider reports zero tokens; the field must still be present.
+    assert "usage" in body
+    assert body["usage"]["prompt_tokens"] == 0
+    assert body["usage"]["completion_tokens"] == 0
+    assert body["usage"]["total_tokens"] == 0
 
 
 def test_moderate_blocks_obvious_spam(client: TestClient) -> None:
@@ -170,3 +175,62 @@ def test_moderate_accepts_correct_bearer(auth_client: TestClient) -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["verdict"] in {"ALLOW", "BLOCK"}
+
+
+# ---------- final_verdict / REVIEW tier ----------
+
+
+def test_moderate_response_exposes_final_verdict_and_threshold(client: TestClient) -> None:
+    """The response must carry the routing-tier verdict and the threshold it
+    was derived from, so clients can explain REVIEW decisions to users."""
+    resp = client.post("/moderate", json={"text": "Привет, как дела?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["final_verdict"] in {"ALLOW", "BLOCK", "REVIEW"}
+    assert 0.0 <= body["confidence_threshold"] <= 1.0
+
+
+def test_health_exposes_confidence_threshold(client: TestClient) -> None:
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "confidence_threshold" in body
+    assert 0.0 <= body["confidence_threshold"] <= 1.0
+
+
+def test_review_tier_triggered_when_threshold_above_mock_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raising the threshold above every MockProvider confidence level (≤0.9)
+    must force final_verdict=REVIEW for every message."""
+    from dataclasses import replace
+
+    from src.utils import Config
+
+    monkeypatch.delenv("API_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("MODERATOR_CONFIG", str(Path("config.yaml").resolve()))
+
+    with TestClient(app) as raw_client:
+        # Monkey-patch the loaded config in place to a very strict threshold.
+        assert api_module._state.config is not None
+        api_module._state.config = replace(api_module._state.config, confidence_threshold=0.999)
+        try:
+            resp = raw_client.post("/moderate", json={"text": "hello"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["final_verdict"] == "REVIEW"
+            assert body["verdict"] in {"ALLOW", "BLOCK"}  # model's raw call is untouched
+        finally:
+            # Restore for other tests.
+            cfg = Config.from_file(Path("config.yaml").resolve())
+            api_module._state.config = cfg
+
+
+def test_batch_response_exposes_final_verdict_on_each_item(client: TestClient) -> None:
+    resp = client.post(
+        "/moderate/batch",
+        json={"texts": ["hi", "hey", "hola"]},
+    )
+    assert resp.status_code == 200
+    for item in resp.json()["results"]:
+        assert item["final_verdict"] in {"ALLOW", "BLOCK", "REVIEW"}

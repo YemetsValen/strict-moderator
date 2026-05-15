@@ -1,15 +1,26 @@
-"""Model providers.
+"""Model providers (sync + async) with usage-token reporting.
 
-Two implementations are bundled:
+Three implementations are bundled:
 
-- :class:`OpenAIProvider`  — calls OpenAI Chat Completions
-- :class:`MockProvider`    — deterministic rule-based classifier; lets CI run
-                             without a real API key and gives a useful
-                             baseline for local development.
+- :class:`OpenAIProvider`     — OpenAI Chat Completions (also drives any
+                                OpenAI-compatible API via ``base_url``)
+- :class:`AnthropicProvider`  — Anthropic Claude Messages API
+- :class:`MockProvider`       — deterministic rule-based classifier; lets
+                                CI run without a real API key
 
-Adding a third provider (Anthropic, DeepSeek, local Ollama, …) is a matter
-of subclassing :class:`ModelProvider` and registering it in
-:func:`build_provider`.
+Every provider exposes both:
+
+  - ``call(system_prompt, text) -> ModelOutput``   (synchronous)
+  - ``await acall(system_prompt, text) -> ModelOutput``  (async)
+
+The async variant is what ``evaluator.evaluate_async`` and the FastAPI
+service use to fan-out requests in parallel under an
+``asyncio.Semaphore``. The sync variant remains for the existing CLI
+flow and unit tests.
+
+Adding a fourth provider (Cohere, Mistral, Gemini, …) is a matter of
+subclassing :class:`ModelProvider`, implementing both ``call`` /
+``acall``, and registering it in :func:`build_provider`.
 """
 
 from __future__ import annotations
@@ -32,6 +43,9 @@ class ModelOutput:
     """Normalised model reply.
 
     ``raw`` keeps the original text so we can debug parse failures.
+    ``prompt_tokens`` / ``completion_tokens`` are reported by the provider
+    when available (OpenAI usage, Anthropic usage); the mock provider and
+    error fallbacks report zero.
     """
 
     verdict: str
@@ -40,37 +54,39 @@ class ModelOutput:
     reason: str
     raw: str
     parse_ok: bool
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 # ---------- provider interface ----------
 class ModelProvider(ABC):
-    """Strategy interface — every provider exposes one method."""
+    """Strategy interface — every provider exposes both sync and async paths.
+
+    Most production paths should prefer ``acall`` so the evaluator and the
+    FastAPI service can fan out requests in parallel.
+    """
 
     @abstractmethod
     def call(self, system_prompt: str, text: str) -> ModelOutput: ...
+
+    @abstractmethod
+    async def acall(self, system_prompt: str, text: str) -> ModelOutput: ...
 
 
 # ---------- OpenAI ----------
 class OpenAIProvider(ModelProvider):
     """Thin wrapper over OpenAI's Chat Completions API.
 
-    The HTTP client is created lazily so the framework still imports cleanly
+    Both clients are created lazily so the framework still imports cleanly
     on machines without an OPENAI_API_KEY (e.g. CI running in mock mode).
     """
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self._client: Any | None = None
+        self._aclient: Any | None = None
 
-    def _ensure_client(self) -> Any:
-        if self._client is not None:
-            return self._client
-        try:
-            from openai import OpenAI  # imported lazily; optional dependency
-        except ImportError as e:  # pragma: no cover - import guard
-            raise RuntimeError(
-                "openai package is not installed. Run `pip install -r requirements.txt`."
-            ) from e
+    def _client_kwargs(self) -> dict[str, Any]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError(
@@ -86,34 +102,72 @@ class OpenAIProvider(ModelProvider):
         # OpenAI Chat Completions schema.
         if self.config.base_url:
             kwargs["base_url"] = self.config.base_url
-        self._client = OpenAI(**kwargs)
+        return kwargs
+
+    def _ensure_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            from openai import OpenAI  # imported lazily; optional dependency
+        except ImportError as e:  # pragma: no cover - import guard
+            raise RuntimeError(
+                "openai package is not installed. Run `pip install -r requirements.txt`."
+            ) from e
+        self._client = OpenAI(**self._client_kwargs())
         return self._client
+
+    def _ensure_aclient(self) -> Any:
+        if self._aclient is not None:
+            return self._aclient
+        try:
+            from openai import AsyncOpenAI  # imported lazily; optional dependency
+        except ImportError as e:  # pragma: no cover - import guard
+            raise RuntimeError(
+                "openai package is not installed. Run `pip install -r requirements.txt`."
+            ) from e
+        self._aclient = AsyncOpenAI(**self._client_kwargs())
+        return self._aclient
+
+    def _request_kwargs(self, system_prompt: str, text: str) -> dict[str, Any]:
+        return {
+            "model": self.config.model_name,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+        }
 
     def call(self, system_prompt: str, text: str) -> ModelOutput:
         client = self._ensure_client()
         try:
-            resp = client.chat.completions.create(
-                model=self.config.model_name,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-                ],
-            )
+            resp = client.chat.completions.create(**self._request_kwargs(system_prompt, text))
         except Exception as e:  # pragma: no cover - network errors aren't unit-testable
             log.warning("OpenAI call failed for text=%r: %s", text[:80], e)
-            return ModelOutput(
-                verdict="BLOCK",
-                category="other",
-                confidence=0.0,
-                reason=f"openai error: {e}",
-                raw="",
-                parse_ok=False,
-            )
-        raw = resp.choices[0].message.content or ""
-        return _parse_or_default(raw, allowed_categories=set(self.config.labels))
+            return _error_output(f"openai error: {e}")
+        return _openai_resp_to_output(resp, allowed_categories=set(self.config.labels))
+
+    async def acall(self, system_prompt: str, text: str) -> ModelOutput:
+        client = self._ensure_aclient()
+        try:
+            resp = await client.chat.completions.create(**self._request_kwargs(system_prompt, text))
+        except Exception as e:  # pragma: no cover - network errors aren't unit-testable
+            log.warning("OpenAI async call failed for text=%r: %s", text[:80], e)
+            return _error_output(f"openai error: {e}")
+        return _openai_resp_to_output(resp, allowed_categories=set(self.config.labels))
+
+
+def _openai_resp_to_output(resp: Any, *, allowed_categories: set[str]) -> ModelOutput:
+    raw = resp.choices[0].message.content or ""
+    usage = getattr(resp, "usage", None)
+    return _parse_or_default(
+        raw,
+        allowed_categories=allowed_categories,
+        prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+        completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+    )
 
 
 # ---------- Anthropic ----------
@@ -134,6 +188,16 @@ class AnthropicProvider(ModelProvider):
     def __init__(self, config: Config) -> None:
         self.config = config
         self._client: Any | None = None
+        self._aclient: Any | None = None
+
+    def _api_key(self) -> str:
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set; either export the key or switch "
+                "model_type to 'mock' / 'openai' in config.yaml."
+            )
+        return api_key
 
     def _ensure_client(self) -> Any:
         if self._client is not None:
@@ -144,37 +208,66 @@ class AnthropicProvider(ModelProvider):
             raise RuntimeError(
                 "anthropic package is not installed. Run `pip install -r requirements.txt`."
             ) from e
-        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set; either export the key or switch "
-                "model_type to 'mock' / 'openai' in config.yaml."
-            )
-        self._client = Anthropic(api_key=api_key, timeout=self.config.request_timeout_seconds)
+        self._client = Anthropic(
+            api_key=self._api_key(),
+            timeout=self.config.request_timeout_seconds,
+        )
         return self._client
+
+    def _ensure_aclient(self) -> Any:
+        if self._aclient is not None:
+            return self._aclient
+        try:
+            from anthropic import AsyncAnthropic  # imported lazily; optional dependency
+        except ImportError as e:  # pragma: no cover - import guard
+            raise RuntimeError(
+                "anthropic package is not installed. Run `pip install -r requirements.txt`."
+            ) from e
+        self._aclient = AsyncAnthropic(
+            api_key=self._api_key(),
+            timeout=self.config.request_timeout_seconds,
+        )
+        return self._aclient
+
+    def _request_kwargs(self, system_prompt: str, text: str) -> dict[str, Any]:
+        return {
+            "model": self.config.model_name,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": text}],
+        }
 
     def call(self, system_prompt: str, text: str) -> ModelOutput:
         client = self._ensure_client()
         try:
-            resp = client.messages.create(
-                model=self.config.model_name,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": text}],
-            )
+            resp = client.messages.create(**self._request_kwargs(system_prompt, text))
         except Exception as e:  # pragma: no cover - network errors aren't unit-testable
             log.warning("Anthropic call failed for text=%r: %s", text[:80], e)
-            return ModelOutput(
-                verdict="BLOCK",
-                category="other",
-                confidence=0.0,
-                reason=f"anthropic error: {e}",
-                raw="",
-                parse_ok=False,
-            )
-        raw = _join_anthropic_text(resp)
-        return _parse_or_default(raw, allowed_categories=set(self.config.labels))
+            return _error_output(f"anthropic error: {e}")
+        return _anthropic_resp_to_output(resp, allowed_categories=set(self.config.labels))
+
+    async def acall(self, system_prompt: str, text: str) -> ModelOutput:
+        client = self._ensure_aclient()
+        try:
+            resp = await client.messages.create(**self._request_kwargs(system_prompt, text))
+        except Exception as e:  # pragma: no cover - network errors aren't unit-testable
+            log.warning("Anthropic async call failed for text=%r: %s", text[:80], e)
+            return _error_output(f"anthropic error: {e}")
+        return _anthropic_resp_to_output(resp, allowed_categories=set(self.config.labels))
+
+
+def _anthropic_resp_to_output(resp: Any, *, allowed_categories: set[str]) -> ModelOutput:
+    raw = _join_anthropic_text(resp)
+    usage = getattr(resp, "usage", None)
+    # Anthropic uses input_tokens/output_tokens; normalise to OpenAI-style
+    # naming so downstream code (cost, summary) doesn't need to branch.
+    return _parse_or_default(
+        raw,
+        allowed_categories=allowed_categories,
+        prompt_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+        completion_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+    )
 
 
 def _join_anthropic_text(resp: Any) -> str:
@@ -244,6 +337,11 @@ class MockProvider(ModelProvider):
             parse_ok=True,
         )
 
+    async def acall(self, system_prompt: str, text: str) -> ModelOutput:
+        # MockProvider has no real I/O: a sync delegation is correct and
+        # keeps the rule logic in one place.
+        return self.call(system_prompt, text)
+
     def _classify(self, text: str) -> tuple[str, float, str]:
         # Order matters: a single message can match more than one rule, so we
         # check the most "promotional" signals first. A bit.ly link inside a
@@ -292,14 +390,36 @@ def call_model(provider: ModelProvider, system_prompt: str, text: str) -> dict[s
         "reason": out.reason,
         "parse_ok": out.parse_ok,
         "raw": out.raw,
+        "prompt_tokens": out.prompt_tokens,
+        "completion_tokens": out.completion_tokens,
     }
 
 
 # ---------- helpers ----------
-def _parse_or_default(raw: str, allowed_categories: set[str]) -> ModelOutput:
+def _error_output(reason: str) -> ModelOutput:
+    """The standard fail-closed fallback when the underlying API call raises."""
+    return ModelOutput(
+        verdict="BLOCK",
+        category="other",
+        confidence=0.0,
+        reason=reason,
+        raw="",
+        parse_ok=False,
+    )
+
+
+def _parse_or_default(
+    raw: str,
+    *,
+    allowed_categories: set[str],
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> ModelOutput:
     """Turn a raw model reply into a normalised :class:`ModelOutput`.
 
-    On any parse failure we log and fall back to BLOCK with confidence 0.0.
+    On any parse failure we log and fall back to BLOCK with confidence 0.0,
+    but the usage tokens (if any) are still attributed — a parse failure
+    still costs money.
     """
     obj = extract_first_json_object(raw)
     if obj is None:
@@ -311,6 +431,8 @@ def _parse_or_default(raw: str, allowed_categories: set[str]) -> ModelOutput:
             reason="invalid JSON in model reply; defaulted to BLOCK",
             raw=raw,
             parse_ok=False,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     category = str(obj.get("category", "other"))
@@ -337,4 +459,6 @@ def _parse_or_default(raw: str, allowed_categories: set[str]) -> ModelOutput:
         reason=reason,
         raw=raw,
         parse_ok=True,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )

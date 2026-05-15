@@ -10,3 +10,4 @@ ignore = ["E741"]  # ambiguous variable name 'l' is fine in metric loops
 addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
