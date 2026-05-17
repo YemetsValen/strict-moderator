@@ -210,3 +210,51 @@ def test_openai_provider_omits_base_url_when_empty(monkeypatch: pytest.MonkeyPat
     provider._ensure_client()
 
     assert "base_url" not in captured
+
+
+# ---------- MockProvider classification ----------
+@pytest.mark.parametrize(
+    ("text", "expected_category", "expected_confidence", "expected_verdict"),
+    [
+        # Strong signals → high confidence (auto-decided, no REVIEW at default 0.5).
+        ("Hey, how was your weekend?", "ok", 0.7, "ALLOW"),
+        ("Купи курс по форексу за 99$, скидка 70%!", "spam", 0.9, "BLOCK"),
+        ("Hi, message me on whatsapp +380501234567", "gray_platform_switch", 0.85, "BLOCK"),
+        ("If you smiled more in your photos, you'd be cuter", "hidden_aggression", 0.8, "BLOCK"),
+        # Weak / borderline signals → low confidence (caller routes to REVIEW).
+        ("Hey, I have a special offer just for you", "spam", 0.45, "BLOCK"),
+        ("Кинь номер свой если хочешь продолжить общение", "gray_platform_switch", 0.45, "BLOCK"),
+        (
+            "Hopefully your personality is as nice as your photos",
+            "hidden_aggression",
+            0.45,
+            "BLOCK",
+        ),
+    ],
+)
+def test_mock_provider_classifies_strong_and_weak_signals(
+    text: str,
+    expected_category: str,
+    expected_confidence: float,
+    expected_verdict: str,
+) -> None:
+    """MockProvider must distinguish strong-signal patterns (high confidence,
+    auto-decided) from weak-signal patterns (low confidence, REVIEW-bound)."""
+    provider = MockProvider(_config("mock"))
+    out = provider.call(system_prompt="ignored", text=text)
+    assert out.category == expected_category
+    assert out.confidence == pytest.approx(expected_confidence)
+    assert out.verdict == expected_verdict
+    assert out.parse_ok is True
+
+
+def test_mock_provider_strong_spam_overrides_platform_signal() -> None:
+    """A spam keyword in a message that ALSO contains a platform handle must
+    be classified as spam (rule order: spam first)."""
+    provider = MockProvider(_config("mock"))
+    out = provider.call(
+        system_prompt="ignored",
+        text="Заработай 5000$ в месяц! Подробности в telegram @money_bot",
+    )
+    assert out.category == "spam"
+    assert out.confidence == pytest.approx(0.9)
