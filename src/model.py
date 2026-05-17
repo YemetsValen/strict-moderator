@@ -310,15 +310,43 @@ class MockProvider(ModelProvider):
         re.IGNORECASE,
     )
     _SPAM = re.compile(
-        r"\b(crypto|forex|invest|earn|заработ|курс|signals|сигнал|"
-        r"скидк|promo|промо|купи|купить|massage|массаж|гуарантирова?н|guarantee)\b",
+        r"\b(crypto|forex|форекс|invest|earn|зараб|курс|signals|сигнал|"
+        r"скидк|promo|промо|купи|купить|massage|массаж|гуарантирова?н|guarantee|"
+        r"onlyfans|free trial)\b",
         re.IGNORECASE,
     )
-    _MONEY = re.compile(r"\$\d|\d+\s?(usd|eur|грн|руб|btc|eth)", re.IGNORECASE)
+    _MONEY = re.compile(
+        r"\$\d|\d+\s?\$|\d+\s?(usd|eur|грн|руб|btc|eth)",
+        re.IGNORECASE,
+    )
     _AGGRESSION = re.compile(
         r"\b(if you smiled|если бы (ты )?улыбал|для своих лет|for your age|"
         r"ну ничего|неплохо для|not bad for|пытаешься|ты бы (была|был) лучше|"
         r"you'?d (be|look) (better|cuter|prettier))",
+        re.IGNORECASE,
+    )
+    # --- Weak / borderline signals ---
+    # These match "hint of a violation" patterns where any reasonable human
+    # moderator would also want a second opinion. Returning low confidence
+    # (~0.45) guarantees the message is routed to REVIEW at the default
+    # confidence_threshold=0.5, while still surfacing the most likely category
+    # so a human reviewer has a starting point.
+    _WEAK_PLATFORM = re.compile(
+        r"(кинь номер|где тебя найти|как с тобой связаться|how can i reach you|"
+        r"give me your number|where can i find you|let'?s chat elsewhere|"
+        r"пиши мне в любом мессенджере|drop me a message somewhere)",
+        re.IGNORECASE,
+    )
+    _WEAK_AGGRESSION = re.compile(
+        r"\b(hopefully your|interesting choice|интересный выбор|smart for (a|an)|"
+        r"умна для|неожиданно для|unusually (smart|articulate)|"
+        r"не подумаешь что ты|you don'?t look like a typical)",
+        re.IGNORECASE,
+    )
+    _WEAK_SPAM = re.compile(
+        r"\b(special offer|special price|выгодное предложение|"
+        r"спецпредложение|good deal|хорошее предложение|"
+        r"разовая акция|limited(-| )time only|только для тебя|just for you)\b",
         re.IGNORECASE,
     )
 
@@ -356,6 +384,14 @@ class MockProvider(ModelProvider):
             return "gray_platform_switch", 0.85, "rule: off-platform indicator"
         if self._AGGRESSION.search(text):
             return "hidden_aggression", 0.8, "rule: backhanded / age-shaming pattern"
+        # Weak signals: same category guess but low confidence so the caller
+        # routes them to REVIEW (final_verdict=REVIEW at threshold>=0.5).
+        if self._WEAK_SPAM.search(text):
+            return "spam", 0.45, "weak: ambiguous promotional tone"
+        if self._WEAK_PLATFORM.search(text):
+            return "gray_platform_switch", 0.45, "weak: vague off-platform hint"
+        if self._WEAK_AGGRESSION.search(text):
+            return "hidden_aggression", 0.45, "weak: possibly backhanded tone"
         return "ok", 0.7, "rule: no red flags"
 
 
