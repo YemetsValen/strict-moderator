@@ -115,6 +115,37 @@ def test_anthropic_provider_recovers_from_markdown_fences() -> None:
     assert out.category == "ok"
 
 
+class _FakeUsage:
+    """Anthropic-shaped usage object: input_tokens / output_tokens."""
+
+    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+def test_anthropic_provider_propagates_usage_tokens() -> None:
+    """input_tokens / output_tokens must be normalised to prompt_/completion_."""
+    response = _FakeAnthropicResponse([_FakeBlock("text", '{"verdict":"ALLOW","category":"ok"}')])
+    response.usage = _FakeUsage(input_tokens=123, output_tokens=45)  # type: ignore[attr-defined]
+    provider = AnthropicProvider(_config("anthropic"))
+    provider._client = _FakeAnthropicClient(response)
+
+    out = provider.call("system", "hi")
+    assert out.prompt_tokens == 123
+    assert out.completion_tokens == 45
+
+
+def test_anthropic_provider_handles_missing_usage_gracefully() -> None:
+    """If the SDK omits usage, we report zero — not crash."""
+    response = _FakeAnthropicResponse([_FakeBlock("text", '{"verdict":"ALLOW","category":"ok"}')])
+    provider = AnthropicProvider(_config("anthropic"))
+    provider._client = _FakeAnthropicClient(response)
+
+    out = provider.call("system", "hi")
+    assert out.prompt_tokens == 0
+    assert out.completion_tokens == 0
+
+
 def test_join_anthropic_text_skips_non_text_blocks() -> None:
     blocks = [
         _FakeBlock("tool_use", "ignored"),

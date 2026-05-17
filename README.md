@@ -1,5 +1,9 @@
 # Moderator
 
+> 🇷🇺 **Не разработчик?** Пошаговая инструкция для запуска "из коробки" —
+> [INSTRUCTIONS_RU.md](INSTRUCTIONS_RU.md). Подходит для запуска на любой ОС
+> без опыта работы с терминалом.
+
 A flexible evaluation framework for **LLM-based content moderation**.
 Plug in a JSONL dataset, pick a model provider, and run accuracy /
 precision / recall / F1 — with optional **macro / micro / weighted**
@@ -17,10 +21,11 @@ prompt that is hardened against simple jailbreak attacks.
 ├── prompts/
 │   └── system_prompt.txt        # the moderator's system prompt
 ├── src/
-│   ├── main.py                  # CLI entry point
+│   ├── main.py                  # CLI entry point (batch evaluation)
+│   ├── api.py                   # FastAPI HTTP service
 │   ├── evaluator.py             # dataset → predictions → metrics
 │   ├── metrics.py               # accuracy/precision/recall/F1 from scratch
-│   ├── model.py                 # OpenAI + mock providers (Strategy pattern)
+│   ├── model.py                 # OpenAI + Anthropic + mock providers
 │   └── utils.py                 # config, JSONL I/O, robust JSON parsing
 ├── tests/                       # pytest unit + jailbreak tests
 ├── config.yaml                  # everything you can tune lives here
@@ -41,7 +46,20 @@ python -m src.main --config config.yaml
 
 By default `config.yaml` uses the **mock provider** — a deterministic
 rule-based classifier that needs no API key. Output is written to
-`reports/last_run.json` and a summary is printed to stdout.
+`reports/last_run.json` (machine-readable) **and** `reports/summary.md`
+(human-readable — headline metrics, cost, plus concrete examples the
+model got wrong or flagged as low-confidence), and a summary is also
+printed to stdout.
+
+### Confidence threshold & human review
+
+The framework supports a **REVIEW tier**: when the model's confidence is
+below `confidence_threshold` (default `0.5` in `config.yaml`), the
+response's `final_verdict` is set to `REVIEW` instead of `ALLOW`/`BLOCK`,
+so callers can route the message to a human moderator instead of acting
+on a shaky LLM decision. The `verdict` field still carries the model's
+raw call for debugging and metric fairness. Set `confidence_threshold:
+0.0` to disable the tier (old binary behaviour).
 
 ### Picking a provider
 
@@ -84,6 +102,73 @@ on the command line:
 ```bash
 python -m src.main --dataset data/my_data.jsonl --model-type openai --output reports/openai.json
 ```
+
+## Async fan-out and cost tracking
+
+The CLI runs the **async pipeline by default** — every example is a
+coroutine, dispatched via `asyncio.gather` under an
+`asyncio.Semaphore(concurrency)`. Tune the cap in `config.yaml`
+(`concurrency: 8`) or per-run with `--concurrency 32`. Pass `--sync` to
+fall back to the historical sequential path (mostly for debugging).
+
+Token usage and a USD cost estimate are reported automatically when the
+provider populates `usage` (OpenAI's `prompt_tokens` / `completion_tokens`
+and Anthropic's `input_tokens` / `output_tokens` are normalised under the
+hood). Pricing lives in `src/cost.py` — unknown models simply omit the
+dollar figure rather than crashing.
+
+```text
+  Prompt tokens       : 12431
+  Completion tokens   : 3210
+  Total tokens        : 15641
+  Estimated cost      : $0.014230
+  Cost / 1k messages  : $1.42
+```
+
+The same fields are surfaced in `reports/last_run.json` (`summary.*`) and
+in the `/moderate` / `/moderate/batch` HTTP responses (`usage`).
+
+## HTTP service (FastAPI)
+
+The same provider stack is also exposed as an HTTP API for use from other
+services / front-ends:
+
+```bash
+pip install -r requirements.txt
+# pick a provider in config.yaml + export the matching API key, then:
+uvicorn src.api:app --host 0.0.0.0 --port 8000
+# or:
+python -m src.api --host 0.0.0.0 --port 8000 --reload
+```
+
+Open http://localhost:8000/docs for the auto-generated Swagger UI.
+
+| Method & path           | Body                                  | Returns                                      |
+|-------------------------|---------------------------------------|----------------------------------------------|
+| `GET /`                 | —                                     | Service info (version, links to /docs)       |
+| `GET /health`           | —                                     | `{status, model_type, model_name, ...}`      |
+| `POST /moderate`        | `{"text": "..."}`                     | `{verdict, category, confidence, reason, …}` |
+| `POST /moderate/batch`  | `{"texts": ["...", "..."]}` (≤ 64)    | `{"results": [...]}`                         |
+
+Example:
+
+```bash
+curl -s -X POST http://localhost:8000/moderate \
+     -H 'Content-Type: application/json' \
+     -d '{"text":"hey, message me on whatsapp +380501234567"}'
+# → {"verdict":"BLOCK","category":"gray_platform_switch","confidence":0.85,...}
+```
+
+**Optional bearer auth.** Set `API_AUTH_TOKEN=<secret>` in the environment
+and every `/moderate*` request must carry `Authorization: Bearer <secret>`.
+`/health` is always open so liveness/readiness probes don't need a token.
+Leave `API_AUTH_TOKEN` unset for local dev — the API will accept all
+requests.
+
+The service loads `config.yaml`, the system prompt, and the chosen
+provider **once at startup** via FastAPI's `lifespan` hook, so each
+request is just one provider call plus JSON parsing. Override the config
+path with `MODERATOR_CONFIG=/path/to/config.yaml`.
 
 ## Example output
 
